@@ -152,6 +152,7 @@ const sessionMiddleware = session({
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: "40kb" }));
 app.use(express.urlencoded({ extended: false, limit: "40kb" }));
+app.set("trust proxy", 1);
 app.use(sessionMiddleware);
 app.use(express.static(path.join(__dirname, "public")));
 
