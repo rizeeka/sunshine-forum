@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#eee9ff">
+  <title>Sunshine Forum — Общайся. Предлагай. Влияй.</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app">
+    <section class="splash">
+      <div class="splash-art"><span class="moon">☾</span><span class="sparkle">✦</span><span class="star s1">✧</span><span class="star s2">✦</span></div>
+      <div class="brand-large">Sunshine<br>Forum</div>
+      <p>Общайся. Предлагай.<br>Влияй.</p>
+      <button class="primary" id="startBtn">Начать</button>
+    </section>
+  </div>
+  <div id="toast" role="status"></div>
+  <dialog id="authDialog" class="modal">
+    <button class="modal-close" data-close>×</button>
+    <div class="brand-small">✦ Sunshine Forum</div>
+    <h2 id="authTitle">Добро пожаловать!</h2>
+    <form id="authForm">
+      <div id="nameField" class="field hidden"><label>Никнейм</label><input name="username" minlength="3" maxlength="24" placeholder="Например, SunshineUser"></div>
+      <div class="field"><label>Email</label><input name="email" type="email" required placeholder="you@example.com"></div>
+      <div class="field"><label>Пароль</label><input name="password" type="password" required minlength="8" placeholder="Не менее 8 символов"></div>
+      <button class="primary wide" id="authSubmit">Войти</button>
+    </form>
+    <p class="muted center" id="authSwitch">Нет аккаунта? <button class="link-btn" id="switchAuth">Зарегистрироваться</button></p>
+  </dialog>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
