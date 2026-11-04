@@ -104,6 +104,20 @@ CREATE TABLE IF NOT EXISTS report_messages (
 CREATE TABLE IF NOT EXISTS post_polls (id INTEGER PRIMARY KEY AUTOINCREMENT, post_id INTEGER NOT NULL UNIQUE REFERENCES posts(id) ON DELETE CASCADE, question TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS poll_options (id INTEGER PRIMARY KEY AUTOINCREMENT, poll_id INTEGER NOT NULL REFERENCES post_polls(id) ON DELETE CASCADE, label TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS poll_votes (poll_id INTEGER NOT NULL REFERENCES post_polls(id) ON DELETE CASCADE, option_id INTEGER NOT NULL REFERENCES poll_options(id) ON DELETE CASCADE, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, PRIMARY KEY(poll_id,user_id));
+CREATE TABLE IF NOT EXISTS idea_votes (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+  value INTEGER NOT NULL CHECK(value IN (-1,1)),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(user_id,post_id)
+);
+CREATE TABLE IF NOT EXISTS chat_reactions (
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  reaction TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY(user_id,message_id)
+);
 CREATE TABLE IF NOT EXISTS chat_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE, attachment_id INTEGER NOT NULL REFERENCES attachments(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS chat_polls (id INTEGER PRIMARY KEY AUTOINCREMENT, message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE, question TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS chat_poll_options (id INTEGER PRIMARY KEY AUTOINCREMENT, poll_id INTEGER NOT NULL REFERENCES chat_polls(id) ON DELETE CASCADE, label TEXT NOT NULL);
@@ -152,7 +166,6 @@ const sessionMiddleware = session({
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: "40kb" }));
 app.use(express.urlencoded({ extended: false, limit: "40kb" }));
-app.set("trust proxy", 1);
 app.use(sessionMiddleware);
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -237,11 +250,13 @@ app.get("/api/posts", (req, res) => {
       (SELECT COUNT(*) FROM attachments a WHERE a.post_id=p.id) files,
       (SELECT COUNT(*) FROM reactions r WHERE r.post_id=p.id) likes,
       (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) comments,
+      (SELECT COALESCE(SUM(v.value),0) FROM idea_votes v WHERE v.post_id=p.id) idea_score,
       EXISTS(SELECT 1 FROM reactions r WHERE r.post_id=p.id AND r.user_id=?) liked
     FROM posts p JOIN users u ON u.id=p.user_id
     ${where.length ? "WHERE " + where.join(" AND ") : ""}
-    ORDER BY p.id DESC LIMIT 100`;
-  res.json({ posts: db.prepare(sql).all(req.session.userId || 0, ...args) });
+    ORDER BY idea_score DESC, p.id DESC LIMIT 100`;
+  const posts=db.prepare(sql).all(req.session.userId || 0, ...args).map(p=>({...p,reactions:db.prepare("SELECT reaction,COUNT(*) count FROM reactions WHERE post_id=? GROUP BY reaction").all(p.id),my_reaction:db.prepare("SELECT reaction FROM reactions WHERE post_id=? AND user_id=?").get(p.id,req.session.userId||0)?.reaction||null}));
+  res.json({ posts });
 });
 
 app.post("/api/posts", requireAuth, postLimiter, (req, res) => {
@@ -269,8 +284,10 @@ app.get("/api/posts/:id", (req, res) => {
   const post = db.prepare(`SELECT p.*,u.username,u.id user_id,
     (SELECT COUNT(*) FROM reactions r WHERE r.post_id=p.id) likes,
     (SELECT COUNT(*) FROM comments c WHERE c.post_id=p.id) comments,
-    EXISTS(SELECT 1 FROM reactions r WHERE r.post_id=p.id AND r.user_id=?) liked
-    FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?`).get(req.session.userId || 0, req.params.id);
+    EXISTS(SELECT 1 FROM reactions r WHERE r.post_id=p.id AND r.user_id=?) liked,
+    (SELECT COALESCE(SUM(v.value),0) FROM idea_votes v WHERE v.post_id=p.id) idea_score,
+    (SELECT value FROM idea_votes v WHERE v.post_id=p.id AND v.user_id=?) my_idea_vote
+    FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?`).get(req.session.userId || 0, req.session.userId || 0, req.params.id);
   if (!post) return res.status(404).json({ error: "Публикация не найдена." });
   const ownerPrivate=db.prepare("SELECT private_profile FROM user_settings WHERE user_id=?").get(post.user_id)?.private_profile===1;
   const viewer=getUser(req.session.userId || 0);
@@ -278,7 +295,7 @@ app.get("/api/posts/:id", (req, res) => {
   const comments = db.prepare(`SELECT c.*,u.username FROM comments c JOIN users u ON u.id=c.user_id WHERE c.post_id=? ORDER BY c.id`).all(post.id).map(c=>({...c,attachments:db.prepare("SELECT id,original_name,mime,size,'/uploads/'||stored_name url FROM attachments WHERE comment_id=?").all(c.id)}));
   const attachments=db.prepare("SELECT id,original_name,mime,size,'/uploads/'||stored_name url FROM attachments WHERE post_id=?").all(post.id);
   const poll=db.prepare("SELECT * FROM post_polls WHERE post_id=?").get(post.id);
-  res.json({ post, comments, attachments, poll:poll?{...poll,options:db.prepare("SELECT o.id,o.label,(SELECT COUNT(*) FROM poll_votes v WHERE v.option_id=o.id) votes FROM poll_options o WHERE o.poll_id=?").all(poll.id),myVote:db.prepare("SELECT option_id FROM poll_votes WHERE poll_id=? AND user_id=?").get(poll.id,req.session.userId||0)?.option_id||null}:null });
+  res.json({ post:{...post,reactions:db.prepare("SELECT reaction,COUNT(*) count FROM reactions WHERE post_id=? GROUP BY reaction").all(post.id),my_reaction:db.prepare("SELECT reaction FROM reactions WHERE post_id=? AND user_id=?").get(post.id,req.session.userId||0)?.reaction||null}, comments, attachments, poll:poll?{...poll,options:db.prepare("SELECT o.id,o.label,(SELECT COUNT(*) FROM poll_votes v WHERE v.option_id=o.id) votes FROM poll_options o WHERE o.poll_id=?").all(poll.id),myVote:db.prepare("SELECT option_id FROM poll_votes WHERE poll_id=? AND user_id=?").get(poll.id,req.session.userId||0)?.option_id||null}:null });
 });
 
 app.post("/api/posts/:id/react", requireAuth, (req, res) => {
@@ -294,6 +311,26 @@ app.post("/api/posts/:id/react", requireAuth, (req, res) => {
   const likes = db.prepare("SELECT COUNT(*) n FROM reactions WHERE post_id=?").get(id).n;
   io.emit("post:updated", { id, likes, comments: db.prepare("SELECT COUNT(*) n FROM comments WHERE post_id=?").get(id).n });
   res.json({ liked: !existing, likes });
+});
+
+app.post("/api/posts/:id/reactions", requireAuth, (req,res)=>{
+  const id=Number(req.params.id), allowed=["heart","like","dislike","fire","happy"], reaction=String(req.body.reaction||"");
+  if(!db.prepare("SELECT id FROM posts WHERE id=?").get(id))return res.status(404).json({error:"Публикация не найдена."});
+  if(!allowed.includes(reaction))return res.status(400).json({error:"Неизвестная реакция."});
+  const old=db.prepare("SELECT reaction FROM reactions WHERE user_id=? AND post_id=?").get(req.user.id,id);
+  if(old?.reaction===reaction)db.prepare("DELETE FROM reactions WHERE user_id=? AND post_id=?").run(req.user.id,id);
+  else db.prepare("INSERT INTO reactions(user_id,post_id,reaction,created_at) VALUES(?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(user_id,post_id) DO UPDATE SET reaction=excluded.reaction,created_at=CURRENT_TIMESTAMP").run(req.user.id,id,reaction);
+  const counts=db.prepare("SELECT reaction,COUNT(*) count FROM reactions WHERE post_id=? GROUP BY reaction").all(id);
+  res.json({mine:old?.reaction===reaction?null:reaction,counts});
+});
+app.post("/api/posts/:id/idea-vote", requireAuth, (req,res)=>{
+  const id=Number(req.params.id),value=Number(req.body.value);
+  if(![-1,1].includes(value))return res.status(400).json({error:"Выберите плюс или минус."});
+  if(!db.prepare("SELECT id FROM posts WHERE id=?").get(id))return res.status(404).json({error:"Публикация не найдена."});
+  const old=db.prepare("SELECT value FROM idea_votes WHERE user_id=? AND post_id=?").get(req.user.id,id);
+  if(old?.value===value)db.prepare("DELETE FROM idea_votes WHERE user_id=? AND post_id=?").run(req.user.id,id);
+  else db.prepare("INSERT INTO idea_votes(user_id,post_id,value) VALUES(?,?,?) ON CONFLICT(user_id,post_id) DO UPDATE SET value=excluded.value").run(req.user.id,id,value);
+  res.json({mine:old?.value===value?0:value,score:db.prepare("SELECT COALESCE(SUM(value),0) score FROM idea_votes WHERE post_id=?").get(id).score});
 });
 
 app.post("/api/posts/:id/comments", requireAuth, postLimiter, (req, res) => {
@@ -401,27 +438,31 @@ app.post("/api/chat/message",requireAuth,upload.array("files",5),(req,res)=>{
  const attachments=db.prepare("SELECT a.id,a.original_name,a.mime,a.size,'/uploads/'||a.stored_name url FROM chat_attachments ca JOIN attachments a ON a.id=ca.attachment_id WHERE ca.message_id=?").all(messageId);
  const message={id:messageId,body:body||"",username:req.user.username,user_id:req.user.id,role:req.user.role,created_at:new Date().toISOString(),attachments,poll};io.emit("chat:message",message);notifyMentions(body,req.user,"в общем чате","chat",messageId);res.json({ok:true,id:messageId});
 });
+app.post("/api/chat/:id/reaction",requireAuth,(req,res)=>{
+ const id=Number(req.params.id),allowed=["heart","like","dislike","fire","happy"],reaction=String(req.body.reaction||"");
+ if(!db.prepare("SELECT id FROM messages WHERE id=?").get(id))return res.status(404).json({error:"Сообщение не найдено."});
+ if(!allowed.includes(reaction))return res.status(400).json({error:"Неизвестная реакция."});
+ const old=db.prepare("SELECT reaction FROM chat_reactions WHERE user_id=? AND message_id=?").get(req.user.id,id);
+ if(old?.reaction===reaction)db.prepare("DELETE FROM chat_reactions WHERE user_id=? AND message_id=?").run(req.user.id,id);
+ else db.prepare("INSERT INTO chat_reactions(user_id,message_id,reaction) VALUES(?,?,?) ON CONFLICT(user_id,message_id) DO UPDATE SET reaction=excluded.reaction").run(req.user.id,id,reaction);
+ const counts=db.prepare("SELECT reaction,COUNT(*) count FROM chat_reactions WHERE message_id=? GROUP BY reaction").all(id);
+ res.json({mine:old?.reaction===reaction?null:reaction,counts});
+});
 app.post("/api/chat/polls/:id/vote",requireAuth,(req,res)=>{const poll=db.prepare("SELECT * FROM chat_polls WHERE id=?").get(req.params.id);if(!poll)return res.status(404).json({error:"Опрос не найден."});const option=db.prepare("SELECT id FROM chat_poll_options WHERE id=? AND poll_id=?").get(Number(req.body.optionId),poll.id);if(!option)return res.status(400).json({error:"Выберите вариант."});db.prepare("INSERT INTO chat_poll_votes(poll_id,option_id,user_id) VALUES(?,?,?) ON CONFLICT(poll_id,user_id) DO UPDATE SET option_id=excluded.option_id").run(poll.id,option.id,req.user.id);res.json({ok:true});});
 app.get("/api/chat/stats", requireAuth, (req,res)=>{
   res.json({ totalUsers: db.prepare("SELECT COUNT(*) n FROM users WHERE status='active'").get().n, onlineUsers: onlineSockets.size });
 });
 
 app.get("/api/chat", requireAuth, (req, res) => {
-  const messages = db.prepare("SELECT m.id,m.body,m.created_at,u.username,u.id user_id,u.role FROM messages m JOIN users u ON u.id=m.user_id ORDER BY m.id DESC LIMIT 80").all().reverse().map(m=>({...m,attachments:db.prepare("SELECT a.id,a.original_name,a.mime,a.size,'/uploads/'||a.stored_name url FROM chat_attachments ca JOIN attachments a ON a.id=ca.attachment_id WHERE ca.message_id=?").all(m.id),poll:(()=>{const p=db.prepare("SELECT * FROM chat_polls WHERE message_id=?").get(m.id);if(!p)return null;return {...p,options:db.prepare("SELECT o.id,o.label,(SELECT COUNT(*) FROM chat_poll_votes v WHERE v.option_id=o.id) votes FROM chat_poll_options o WHERE o.poll_id=?").all(p.id),myVote:db.prepare("SELECT option_id FROM chat_poll_votes WHERE poll_id=? AND user_id=?").get(p.id,req.user.id)?.option_id||null};})()}));
+  const messages = db.prepare("SELECT m.id,m.body,m.created_at,u.username,u.id user_id,u.role FROM messages m JOIN users u ON u.id=m.user_id ORDER BY m.id DESC LIMIT 80").all().reverse().map(m=>({...m,attachments:db.prepare("SELECT a.id,a.original_name,a.mime,a.size,'/uploads/'||a.stored_name url FROM chat_attachments ca JOIN attachments a ON a.id=ca.attachment_id WHERE ca.message_id=?").all(m.id),poll:(()=>{const p=db.prepare("SELECT * FROM chat_polls WHERE message_id=?").get(m.id);if(!p)return null;return {...p,options:db.prepare("SELECT o.id,o.label,(SELECT COUNT(*) FROM chat_poll_votes v WHERE v.option_id=o.id) votes FROM chat_poll_options o WHERE o.poll_id=?").all(p.id),myVote:db.prepare("SELECT option_id FROM chat_poll_votes WHERE poll_id=? AND user_id=?").get(p.id,req.user.id)?.option_id||null};})(),reactions:db.prepare("SELECT reaction,COUNT(*) count FROM chat_reactions WHERE message_id=? GROUP BY reaction").all(m.id),myReaction:db.prepare("SELECT reaction FROM chat_reactions WHERE message_id=? AND user_id=?").get(m.id,req.user.id)?.reaction||null}));
   const mute = db.prepare("SELECT muted_until FROM chat_mutes WHERE user_id=? AND muted_until > datetime('now')").get(req.user.id);
   res.json({ messages, mutedUntil: mute?.muted_until || null });
 });
-app.get("/api/chat/message/:id", requireAuth, (req,res) => {
-  const m=db.prepare("SELECT m.id,m.body,m.created_at,u.username,u.id user_id,u.role FROM messages m JOIN users u ON u.id=m.user_id WHERE m.id=?").get(Number(req.params.id));
-  if(!m) return res.status(404).json({error:"Сообщение не найдено."});
-  const attachments=db.prepare("SELECT a.id,a.original_name,a.mime,a.size,'/uploads/'||a.stored_name url FROM chat_attachments ca JOIN attachments a ON a.id=ca.attachment_id WHERE ca.message_id=?").all(m.id);
-  const p=db.prepare("SELECT * FROM chat_polls WHERE message_id=?").get(m.id);
-  const poll=p?{...p,options:db.prepare("SELECT o.id,o.label,(SELECT COUNT(*) FROM chat_poll_votes v WHERE v.option_id=o.id) votes FROM chat_poll_options o WHERE o.poll_id=?").all(p.id),myVote:db.prepare("SELECT option_id FROM chat_poll_votes WHERE poll_id=? AND user_id=?").get(p.id,req.user.id)?.option_id||null}:null;
-  res.json({message:{...m,attachments,poll}});
-});
-
 app.get("/api/chat/users",requireAuth,(req,res)=>{
-  res.json({users:db.prepare("SELECT username FROM users WHERE status='active' ORDER BY username LIMIT 200").all()});
+  const users=db.prepare("SELECT u.id,u.username,u.avatar,u.role,COALESCE(s.private_profile,0) private_profile FROM users u LEFT JOIN user_settings s ON s.user_id=u.id WHERE u.status='active' ORDER BY u.username LIMIT 300").all()
+    .filter(u=>!u.private_profile)
+    .map(({private_profile,...u})=>({...u,online:onlineSockets.has(u.id)}));
+  res.json({users});
 });
 
 app.get("/api/admin/overview", requireAuth, requireStaff, (req, res) => {
@@ -485,7 +526,7 @@ app.get("/uploads/:filename",requireAuth,(req,res)=>{ const filename=path.basena
 app.get("/api/settings",requireAuth,(req,res)=>{ db.prepare("INSERT OR IGNORE INTO user_settings(user_id) VALUES(?)").run(req.user.id); res.json({settings:db.prepare("SELECT notify_likes,notify_comments,notify_reports,private_profile FROM user_settings WHERE user_id=?").get(req.user.id)}); });
 app.patch("/api/settings",requireAuth,(req,res)=>{ const keys=["notify_likes","notify_comments","notify_reports","private_profile"]; const vals=keys.map(k=>req.body[k]?1:0); db.prepare("INSERT INTO user_settings(user_id,notify_likes,notify_comments,notify_reports,private_profile) VALUES(?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET notify_likes=excluded.notify_likes,notify_comments=excluded.notify_comments,notify_reports=excluded.notify_reports,private_profile=excluded.private_profile").run(req.user.id,...vals); res.json({ok:true}); });
 app.post("/api/reports/:id/messages",requireAuth,(req,res)=>{ const report=db.prepare("SELECT * FROM reports WHERE id=?").get(req.params.id); if(!report)return res.status(404).json({error:"Обращение не найдено."}); if(report.user_id!==req.user.id && req.user.role!=="admin" && req.user.role!=="moderator")return res.status(403).json({error:"Нет доступа."}); const body=clean(req.body.body,2000); if(!body)return res.status(400).json({error:"Введите сообщение."}); db.prepare("INSERT INTO report_messages(report_id,user_id,body) VALUES(?,?,?)").run(report.id,req.user.id,body); if(report.user_id!==req.user.id){ notify(report.user_id,"Администрация ответила на ваше обращение.","report",report.id); db.prepare("UPDATE reports SET status=CASE WHEN status='Новая' THEN 'В работе' ELSE status END WHERE id=?").run(report.id); } else { const staff=db.prepare("SELECT id FROM users WHERE role IN ('admin','moderator') AND status='active'").all(); staff.forEach(x=>notify(x.id,"Новое сообщение в обращении #"+report.id+".","report",report.id)); } io.to("report:"+report.id).emit("report:message",{reportId:report.id}); res.json({ok:true}); });
-app.get("/api/reports/:id/messages",requireAuth,(req,res)=>{ const report=db.prepare("SELECT * FROM reports WHERE id=?").get(req.params.id); if(!report)return res.status(404).json({error:"Обращение не найдено."}); if(report.user_id!==req.user.id && !["admin","moderator"].includes(req.user.role))return res.status(403).json({error:"Нет доступа."}); res.json({messages:[{id:0,report_id:report.id,user_id:report.user_id,username:db.prepare("SELECT username FROM users WHERE id=?").get(report.user_id).username,body:report.body,created_at:report.created_at,initial:true}],...{attachments:db.prepare("SELECT id,original_name,mime,size,'/uploads/'||stored_name url FROM attachments WHERE report_id=? ORDER BY id").all(report.id)},...{replies:db.prepare("SELECT m.*,u.username FROM report_messages m JOIN users u ON u.id=m.user_id WHERE report_id=? ORDER BY m.id").all(report.id)}}); });
+app.get("/api/reports/:id/messages",requireAuth,(req,res)=>{ const report=db.prepare("SELECT * FROM reports WHERE id=?").get(req.params.id); if(!report)return res.status(404).json({error:"Обращение не найдено."}); if(report.user_id!==req.user.id && req.user.role!=="admin")return res.status(403).json({error:"Нет доступа."}); res.json({messages:[{id:0,report_id:report.id,user_id:report.user_id,username:db.prepare("SELECT username FROM users WHERE id=?").get(report.user_id).username,body:report.body,created_at:report.created_at,initial:true}],...{attachments:db.prepare("SELECT id,original_name,mime,size,'/uploads/'||stored_name url FROM attachments WHERE report_id=? ORDER BY id").all(report.id)},...{replies:db.prepare("SELECT m.*,u.username FROM report_messages m JOIN users u ON u.id=m.user_id WHERE report_id=? ORDER BY m.id").all(report.id)}}); });
 // Search users for staff and list a user's own support tickets.
 app.get("/api/reports",requireAuth,(req,res)=>{
   const rows = req.user.role === "admin" || req.user.role === "moderator"

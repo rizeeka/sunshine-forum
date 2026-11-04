@@ -1,11 +1,4 @@
 node_modules/
 .env
-.env.*
-!.env.example
 data/
-uploads/
-*.db
-*.sqlite
-*.sqlite3
-*.log
-backups/
+.DS_Store
