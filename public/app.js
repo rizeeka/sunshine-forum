@@ -16,7 +16,7 @@ const COMMUNITY_RULES = [
 ];
 let me = null, authMode = "login", activeTab = "home", socket = null, currentFilter = "Все", searchTerm = " ", unreadCount = 0;
 const api = async (url, options={}) => {
-const res = await fetch("/api" + url, { credentials: "same-origin", headers:{ ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json"}), ...(options.headers||{}) }, ...options });
+const res = await fetch("/api" + url, { credentials: "include", headers:{ ...(options.body instanceof FormData ? {} : { "Content-Type": "application/json"}), ...(options.headers||{}) }, ...options });
 const data = await res.json().catch(()=>({}));
 if (!res.ok) throw new Error(data.error || "Что-то пошло не так.");
 return data;
